@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="nb">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#000000">
+  <title>Slideshow</title>
+  <style>
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
+    body { cursor: none; }
+    .slide {
+      position: fixed; inset: 0; width: 100%; height: 100%;
+      object-fit: contain; object-position: center;
+      opacity: 0; transition: opacity 1.5s ease-in-out;
+      pointer-events: none; user-select: none;
+    }
+    .slide.visible { opacity: 1; }
+  </style>
+</head>
+<body>
+  <script>
+    'use strict';
+    const INTERVAL = 20000;
+    const REFRESH = 60000;
+    const TIMEOUT = 12000;
+    let files = [];
+    let current = null;
+    let currentPath = null;
+    let revision = 0;
+    let changing = false;
+    let refreshing = false;
+    let sequence = 0;
+
+    function freshURL(path) {
+      const url = new URL(path, document.baseURI);
+      url.searchParams.set('_fresh', Date.now() + '-' + (++sequence));
+      return url.href;
+    }
+
+    function loadImage(path) {
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.alt = '';
+        img.className = 'slide';
+        img.draggable = false;
+        const timer = setTimeout(() => finish(new Error('Image timeout')), TIMEOUT);
+        function finish(error) {
+          clearTimeout(timer);
+          img.onload = img.onerror = null;
+          if (error) { img.removeAttribute('src'); reject(error); }
+          else resolve(img);
+        }
+        img.onload = () => finish();
+        img.onerror = () => finish(new Error('Image failed'));
+        img.src = freshURL(path);
+      });
+    }
+
+    async function advance() {
+      if (changing || !files.length) return;
+      changing = true;
+      const snapshot = files.slice();
+      const generation = revision;
+      const start = (snapshot.indexOf(currentPath) + 1) % snapshot.length;
+      try {
+        for (let i = 0; i < snapshot.length; i++) {
+          if (generation !== revision) return;
+          const path = snapshot[(start + i) % snapshot.length];
+          try {
+            const img = await loadImage(path);
+            if (generation !== revision) return;
+            document.body.appendChild(img);
+            // Establish opacity: 0 before starting the transition.
+            void img.offsetWidth;
+            const previous = current;
+            current = img;
+            currentPath = path;
+            img.classList.add('visible');
+            if (previous) {
+              previous.classList.remove('visible');
+              setTimeout(() => previous.remove(), 1600);
+            }
+            return;
+          } catch (error) {
+            console.warn('Could not load image:', path, error);
+          }
+        }
+        // Keep the last successful image when offline or all files fail.
+      } finally { changing = false; }
+    }
+
+    async function refreshList() {
+      if (refreshing) return;
+      refreshing = true;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), TIMEOUT);
+      try {
+        const response = await fetch(freshURL('images.json'), {
+          cache: 'no-store', signal: controller.signal
+        });
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        const data = await response.json();
+        if (!Array.isArray(data) || !data.every(path =>
+          typeof path === 'string' && path.trim() &&
+          ['http:', 'https:'].includes(new URL(path, document.baseURI).protocol)
+        )) throw new Error('images.json must be an array of image paths');
+        const next = [...new Set(data.map(path => path.trim()))];
+        if (JSON.stringify(next) !== JSON.stringify(files)) {
+          files = next;
+          revision++;
+          if (!files.length) {
+            document.querySelectorAll('.slide').forEach(img => img.remove());
+            current = null;
+            currentPath = null;
+          }
+        }
+        if (!current && files.length) void advance();
+      } catch (error) {
+        console.warn('Keeping last valid image list:', error);
+      } finally {
+        clearTimeout(timer);
+        refreshing = false;
+      }
+    }
+
+    void refreshList();
+    setInterval(advance, INTERVAL);
+    setInterval(refreshList, REFRESH);
+    window.addEventListener('online', refreshList);
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) void refreshList();
+    });
+  </script>
+</body>
+</html>
